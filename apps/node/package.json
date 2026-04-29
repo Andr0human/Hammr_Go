@@ -1,0 +1,45 @@
+{
+  "name": "@hammr/node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rimraf dist",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "migrate:clickhouse": "node scripts/migrate-clickhouse.mjs",
+    "smoke:undici": "tsx scripts/undici-smoke.ts",
+    "gen:demo": "tsx scripts/generator-cli.ts",
+    "start-test": "tsx scripts/start-test.ts",
+    "watch-test": "tsx scripts/watch-test.ts",
+    "echo-server": "tsx scripts/echo-server.ts",
+    "selftest": "tsx scripts/selftest.ts",
+    "sweep": "tsx scripts/sweep-vu-per-thread.ts",
+    "test": "tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "@clickhouse/client": "^1.0.2",
+    "@hammr/shared": "*",
+    "better-sqlite3": "^11.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonpath-plus": "^8.1.0",
+    "pino": "^9.0.0",
+    "pino-pretty": "^11.0.0",
+    "socket.io": "^4.7.5",
+    "undici": "^6.13.0",
+    "ws": "^8.17.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.9",
+    "@types/express": "^4.17.21",
+    "@types/ws": "^8.5.10",
+    "rimraf": "^5.0.5",
+    "socket.io-client": "^4.8.3",
+    "tsx": "^4.7.2",
+    "typescript": "^5.4.5"
+  }
+}

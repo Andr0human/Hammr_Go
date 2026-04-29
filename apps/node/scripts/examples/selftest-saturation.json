@@ -1,0 +1,27 @@
+{
+  "name": "Session 8 self-test - echo saturation",
+  "baseUrl": "http://localhost:4000",
+  "config": {
+    "users": 200,
+    "rampUp": "5s",
+    "duration": "30s",
+    "thinkTime": 0
+  },
+  "scenario": [
+    {
+      "name": "Login",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "body": { "email": "test@test.com", "password": "test123" },
+      "extract": { "authToken": "$.token" },
+      "thinkTime": 0
+    },
+    {
+      "name": "Search Jobs",
+      "method": "GET",
+      "path": "/api/jobs?q=engineer",
+      "headers": { "Authorization": "Bearer {{authToken}}" },
+      "thinkTime": 0
+    }
+  ]
+}
