@@ -1,3 +1,9 @@
+// If you edit this file, also update apps/go-generator/internal/scenario/parse.go
+// and apps/go-generator/internal/scenario/types.go so the Go generator
+// validates and decodes scenarios identically. The Stage 1/2 tests on the
+// Go side will catch shape drift; semantic drift (new validation rules,
+// new fields) won't — keep the two ports in sync by hand.
+
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 export type ThinkTime = number | { min: number; max: number };

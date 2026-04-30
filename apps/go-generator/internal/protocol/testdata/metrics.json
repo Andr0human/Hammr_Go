@@ -1,0 +1,1 @@
+{"type":"metrics","testId":"t-001","batch":[{"stepName":"Ping","statusCode":200,"latencyMs":12,"responseBytes":34,"timestamp":1735689600000,"generatorId":"gen-local-1","threadId":0,"vuId":1},{"stepName":"Ping","statusCode":0,"latencyMs":3,"responseBytes":0,"timestamp":1735689600050,"generatorId":"gen-local-1","threadId":0,"vuId":2}],"droppedEvents":7}

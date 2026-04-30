@@ -148,3 +148,17 @@ docs/
 **/data/*.db
 **/data/*.db-*
 
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+go.work
+go.work.sum
+/apps/go-generator/generator
+/apps/go-generator/cmd/generator/generator
+

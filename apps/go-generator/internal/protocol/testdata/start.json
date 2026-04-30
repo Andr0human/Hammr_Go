@@ -1,0 +1,1 @@
+{"type":"start","testId":"t-001","scenario":{"name":"Demo","baseUrl":"http://localhost:4000","config":{"users":10,"rampUp":"5s","duration":"30s"},"scenario":[{"name":"Ping","method":"GET","path":"/"}]},"vus":10,"rampUpMs":5000,"durationMs":30000}
