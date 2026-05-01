@@ -8,6 +8,7 @@ export interface RunSummary {
   vus: number;
   targetUrl: string;
   steadyStateP95: number;
+  steadyStateP99: number;
   steadyStateRps: number;
   errorRate: number;
   shape: RunShape;
@@ -18,8 +19,27 @@ export interface RunSummary {
 // the signal. Below this, the second data point is holding the first back
 // (queueing, pool exhaustion, CPU saturation) rather than scaling with it.
 const SCALING_FLOOR = 0.7;
+// Soft drift: above the hard floor but below 0.85 means RPS-per-VU has
+// dropped >15% — early saturation, worth surfacing as info.
+const SCALING_DRIFT_FLOOR = 0.85;
 // Latency blowup: 2× latency for ≤ 2× load is the knee signal.
 const BLOWUP_RATIO = 2;
+// Tail divergence: p99 growing meaningfully faster than p95 across rungs
+// means the long tail is widening even when the typical case looks stable.
+const TAIL_DIVERGENCE_RATIO = 1.5;
+// Shape ordering for shape_degradation. Order matches user-perceived "worse":
+// healthy → spike-recover → monotonic-climb → elevated-plateau, where
+// elevated-plateau is the worst (system absorbed load at a permanent
+// degraded floor) and monotonic-climb is "still climbing" (likely heading
+// to plateau but not there yet). shape_divergence handles the special
+// healthy/spike-recover → monotonic-climb case at higher severity.
+const SHAPE_RANK_ORDER: RunShape[] = ['healthy', 'spike-recover', 'monotonic-climb', 'elevated-plateau'];
+const SHAPE_RANK: Record<RunShape, number> = {
+  healthy: 0,
+  'spike-recover': 1,
+  'monotonic-climb': 2,
+  'elevated-plateau': 3,
+};
 // Error escalation thresholds — mirror Phase 1 error_spike levels so
 // single-run and cross-run views agree on what "bad" means.
 const ERROR_WARN = 0.01;
@@ -47,6 +67,9 @@ export function buildRunSummary(input: RunInput): RunSummary {
   const steadyStateP95 = weight > 0
     ? steady.reduce((s, r) => s + r.p95 * r.rps, 0) / weight
     : meanOf(steady.map((r) => r.p95));
+  const steadyStateP99 = weight > 0
+    ? steady.reduce((s, r) => s + r.p99 * r.rps, 0) / weight
+    : meanOf(steady.map((r) => r.p99));
   const secondsSpan = new Set(steady.map((r) => r.second)).size || 1;
   const steadyStateRps = steady.reduce((s, r) => s + r.rps, 0) / secondsSpan;
   const errorRate = weight > 0
@@ -57,6 +80,7 @@ export function buildRunSummary(input: RunInput): RunSummary {
     vus,
     targetUrl,
     steadyStateP95,
+    steadyStateP99,
     steadyStateRps,
     errorRate,
     shape: classifyShape(findings),
@@ -86,7 +110,9 @@ function analyzeVuSweep(runs: RunSummary[]): Finding[] {
   const out: Finding[] = [];
 
   let worstScale: { a: RunSummary; b: RunSummary; eff: number } | null = null;
+  const driftPairs: { a: RunSummary; b: RunSummary; eff: number }[] = [];
   let worstBlow: { a: RunSummary; b: RunSummary; ratio: number } | null = null;
+  let worstTail: { a: RunSummary; b: RunSummary; p99Ratio: number; p95Ratio: number } | null = null;
   let kneeIdx: number | null = null;
 
   for (let i = 1; i < runs.length; i++) {
@@ -98,11 +124,22 @@ function analyzeVuSweep(runs: RunSummary[]): Finding[] {
     const eff = rpsRatio / vuRatio;
     if (eff < SCALING_FLOOR && (!worstScale || eff < worstScale.eff)) {
       worstScale = { a, b, eff };
+    } else if (eff >= SCALING_FLOOR && eff < SCALING_DRIFT_FLOOR) {
+      driftPairs.push({ a, b, eff });
     }
     if (a.steadyStateP95 > 0) {
       const pRatio = b.steadyStateP95 / a.steadyStateP95;
       if (pRatio > BLOWUP_RATIO && vuRatio <= 2) {
         if (!worstBlow || pRatio > worstBlow.ratio) worstBlow = { a, b, ratio: pRatio };
+      }
+    }
+    if (a.steadyStateP95 > 0 && a.steadyStateP99 > 0) {
+      const p95Ratio = b.steadyStateP95 / a.steadyStateP95;
+      const p99Ratio = b.steadyStateP99 / a.steadyStateP99;
+      if (p99Ratio >= p95Ratio * TAIL_DIVERGENCE_RATIO && p99Ratio > 1) {
+        if (!worstTail || p99Ratio / Math.max(p95Ratio, 1e-9) > worstTail.p99Ratio / Math.max(worstTail.p95Ratio, 1e-9)) {
+          worstTail = { a, b, p99Ratio, p95Ratio };
+        }
       }
     }
     const errorCrossed = a.errorRate < ERROR_WARN && b.errorRate >= ERROR_WARN;
@@ -131,6 +168,56 @@ function analyzeVuSweep(runs: RunSummary[]): Finding[] {
     });
   }
 
+  if (driftPairs.length > 0) {
+    const sorted = [...driftPairs].sort((p, q) => p.eff - q.eff);
+    const worst = sorted[0]!;
+    const dropPct = Math.round((1 - worst.eff) * 100);
+    const headline = driftPairs.length === 1
+      ? `RPS-per-VU dropped ${dropPct}% between ${worst.a.vus} and ${worst.b.vus} VUs.`
+      : `RPS-per-VU drift across ${driftPairs.length} rung pairs (worst ${dropPct}% drop ${worst.a.vus}→${worst.b.vus} VU).`;
+    const pairList = sorted
+      .map((p) => `${p.a.vus}→${p.b.vus} VU (eff ${p.eff.toFixed(2)})`)
+      .join(', ');
+    out.push({
+      severity: 'info',
+      rule: 'scaling_efficiency_drift',
+      headline,
+      detail: `Pairs above the ${SCALING_FLOOR} breakdown floor but below ${SCALING_DRIFT_FLOOR}: ${pairList}. Early saturation signal.`,
+    });
+  }
+
+  if (runs.length >= 3 && !worstScale) {
+    // Suppressed when hard scaling_efficiency fires — that warn already
+    // covers "throughput broke down"; an info-tier end-to-end restatement
+    // just adds noise at lower severity.
+    const first = runs[0]!;
+    const last = runs[runs.length - 1]!;
+    const vuRatio = last.vus / first.vus;
+    const rpsRatio = first.steadyStateRps > 0 ? last.steadyStateRps / first.steadyStateRps : 1;
+    const overallEff = rpsRatio / vuRatio;
+    if (overallEff > 0 && overallEff < SCALING_DRIFT_FLOOR) {
+      const dropPct = Math.round((1 - overallEff) * 100);
+      const nearFloor = overallEff < SCALING_FLOOR + 0.05;
+      const detailNote = nearFloor ? ` Sits within 0.05 of the ${SCALING_FLOOR} hard breakdown floor — sweep is approaching capacity ceiling.` : '';
+      out.push({
+        severity: 'info',
+        rule: 'scaling_efficiency_overall',
+        headline: `End-to-end RPS-per-VU dropped ${dropPct}% from ${first.vus} to ${last.vus} VUs.`,
+        detail: `${vuRatio.toFixed(1)}× load produced ${rpsRatio.toFixed(2)}× throughput (overall efficiency ${overallEff.toFixed(2)}, drift floor ${SCALING_DRIFT_FLOOR}).${detailNote}`,
+      });
+    }
+  }
+
+  if (worstTail) {
+    const { a, b, p99Ratio, p95Ratio } = worstTail;
+    out.push({
+      severity: 'info',
+      rule: 'tail_divergence',
+      headline: `p99 grew ${p99Ratio.toFixed(1)}× while p95 grew ${p95Ratio.toFixed(1)}× between ${a.vus} and ${b.vus} VUs.`,
+      detail: `${a.vus} VU → p95 ~${Math.round(a.steadyStateP95)}ms / p99 ~${Math.round(a.steadyStateP99)}ms; ${b.vus} VU → p95 ~${Math.round(b.steadyStateP95)}ms / p99 ~${Math.round(b.steadyStateP99)}ms. Tail is widening faster than the typical case.`,
+    });
+  }
+
   let worstErr: RunSummary | null = null;
   for (const r of runs) {
     if (!worstErr || r.errorRate > worstErr.errorRate) worstErr = r;
@@ -150,6 +237,7 @@ function analyzeVuSweep(runs: RunSummary[]): Finding[] {
     });
   }
 
+  let shapeDivergenceFired = false;
   for (let i = 1; i < runs.length; i++) {
     const a = runs[i - 1]!;
     const b = runs[i]!;
@@ -161,19 +249,48 @@ function analyzeVuSweep(runs: RunSummary[]): Finding[] {
         headline: `System recovered at ${a.vus} VUs but could not recover at ${b.vus} VUs.`,
         detail: `Lower-load run shape "${a.shape}"; higher-load run shape "${b.shape}" — you've crossed the capacity knee.`,
       });
+      shapeDivergenceFired = true;
       break;
+    }
+  }
+
+  if (!shapeDivergenceFired) {
+    let worstStep: { a: RunSummary; b: RunSummary; jump: number } | null = null;
+    for (let i = 1; i < runs.length; i++) {
+      const a = runs[i - 1]!;
+      const b = runs[i]!;
+      const jump = SHAPE_RANK[b.shape] - SHAPE_RANK[a.shape];
+      if (jump > 0 && (!worstStep || jump > worstStep.jump)) {
+        worstStep = { a, b, jump };
+      }
+    }
+    if (worstStep) {
+      const { a, b } = worstStep;
+      out.push({
+        severity: 'warn',
+        rule: 'shape_degradation',
+        headline: `Run shape worsened from "${a.shape}" at ${a.vus} VUs to "${b.shape}" at ${b.vus} VUs.`,
+        detail: `Shape rank: ${SHAPE_RANK[a.shape]} → ${SHAPE_RANK[b.shape]} (${SHAPE_RANK_ORDER.join(' < ')}). Steady-state behaviour degraded as load increased.`,
+      });
     }
   }
 
   if (runs.length >= 3 && kneeIdx !== null) {
     const a = runs[kneeIdx - 1]!;
     const b = runs[kneeIdx]!;
-    out.push({
-      severity: 'info',
-      rule: 'capacity_knee',
-      headline: `Capacity knee between ${a.vus} and ${b.vus} VUs.`,
-      detail: `Scaling efficiency or latency first breaks below threshold at this step; lower-load rungs scaled cleanly.`,
-    });
+    // Suppress capacity_knee when the first-failing pair is also the
+    // pair already named by scaling_efficiency or latency_blowup — the
+    // info-tier "knee" message would just restate the warn.
+    const sameAsWorstScale = worstScale && worstScale.a === a && worstScale.b === b;
+    const sameAsWorstBlow = worstBlow && worstBlow.a === a && worstBlow.b === b;
+    if (!sameAsWorstScale && !sameAsWorstBlow) {
+      out.push({
+        severity: 'info',
+        rule: 'capacity_knee',
+        headline: `Capacity knee between ${a.vus} and ${b.vus} VUs.`,
+        detail: `Scaling efficiency or latency first breaks below threshold at this step; lower-load rungs scaled cleanly.`,
+      });
+    }
   }
 
   if (out.length === 0) {

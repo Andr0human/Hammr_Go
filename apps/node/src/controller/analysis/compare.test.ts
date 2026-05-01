@@ -23,17 +23,24 @@ function flatMetrics(seconds: number, p95: number, rps: number, errorRate = 0): 
 }
 
 function summary(over: Partial<RunSummary>): RunSummary {
-  return {
+  const base: RunSummary = {
     testId: 't',
     vus: 50,
     targetUrl: 'https://a.example',
     steadyStateP95: 300,
+    steadyStateP99: 360,
     steadyStateRps: 50,
     errorRate: 0,
     shape: 'healthy',
     findings: [],
-    ...over,
   };
+  const merged = { ...base, ...over };
+  // If caller overrode p95 but not p99, keep p99 proportional so tail-divergence
+  // doesn't fire incidentally in tests targeting other rules.
+  if (over.steadyStateP95 !== undefined && over.steadyStateP99 === undefined) {
+    merged.steadyStateP99 = over.steadyStateP95 * 1.2;
+  }
+  return merged;
 }
 
 test('detectDimension accepts VU-only selection', () => {
@@ -101,8 +108,116 @@ test('buildRunSummary computes steady-state stats from metrics', () => {
     rampUpMs: 2000,
   });
   assert.ok(sum.steadyStateP95 > 390 && sum.steadyStateP95 < 410);
+  assert.ok(sum.steadyStateP99 > 470 && sum.steadyStateP99 < 490);
   assert.ok(sum.steadyStateRps > 45 && sum.steadyStateRps < 55);
   assert.equal(sum.errorRate, 0);
+});
+
+test('VU sweep: scaling_efficiency_drift fires info when RPS/VU drops 15-30%', () => {
+  // 20→50 VU: 2.5x load, 2.075x rps → eff 0.83 (between 0.70 floor and 0.85 drift)
+  const runs = [
+    summary({ testId: 'a', vus: 10, steadyStateP95: 250, steadyStateRps: 37 }),
+    summary({ testId: 'b', vus: 20, steadyStateP95: 262, steadyStateRps: 72 }),
+    summary({ testId: 'c', vus: 50, steadyStateP95: 370, steadyStateRps: 150 }),
+  ];
+  const findings = compareRuns(runs, 'vu_count');
+  const drift = findings.find((f) => f.rule === 'scaling_efficiency_drift');
+  assert.ok(drift, 'expected scaling_efficiency_drift finding');
+  assert.equal(drift!.severity, 'info');
+  // Hard scaling_efficiency must NOT fire (eff > 0.7 everywhere here)
+  assert.equal(findings.find((f) => f.rule === 'scaling_efficiency'), undefined);
+});
+
+test('VU sweep: scaling_efficiency_drift suppressed when hard scaling_efficiency fires', () => {
+  const runs = [
+    summary({ testId: 'a', vus: 50, steadyStateP95: 200, steadyStateRps: 50 }),
+    summary({ testId: 'b', vus: 100, steadyStateP95: 220, steadyStateRps: 60 }), // eff 0.6
+  ];
+  const findings = compareRuns(runs, 'vu_count');
+  assert.ok(findings.some((f) => f.rule === 'scaling_efficiency'));
+  assert.equal(findings.find((f) => f.rule === 'scaling_efficiency_drift'), undefined);
+});
+
+test('VU sweep: tail_divergence fires info when p99 grows >=1.5x faster than p95', () => {
+  const runs = [
+    summary({ testId: 'a', vus: 10, steadyStateP95: 250, steadyStateP99: 400, steadyStateRps: 37 }),
+    // p95 ratio 1.04, p99 ratio 1.75 — p99 grew far faster than p95
+    summary({ testId: 'b', vus: 20, steadyStateP95: 260, steadyStateP99: 700, steadyStateRps: 74 }),
+  ];
+  const findings = compareRuns(runs, 'vu_count');
+  const tail = findings.find((f) => f.rule === 'tail_divergence');
+  assert.ok(tail, 'expected tail_divergence finding');
+  assert.equal(tail!.severity, 'info');
+});
+
+test('VU sweep: scaling_efficiency_drift batches all drift pairs into one finding', () => {
+  // 10→20: eff 0.96 (no drift). 20→50: eff 0.83 (drift). 50→60: eff 1.10
+  // (no drift, super-linear noise). 60→80: eff 0.84 (drift).
+  const runs = [
+    summary({ testId: 'a', vus: 10, steadyStateP95: 250, steadyStateRps: 37 }),
+    summary({ testId: 'b', vus: 20, steadyStateP95: 262, steadyStateRps: 72 }),
+    summary({ testId: 'c', vus: 50, steadyStateP95: 370, steadyStateRps: 150 }),
+    summary({ testId: 'd', vus: 60, steadyStateP95: 266, steadyStateRps: 198 }),
+    summary({ testId: 'e', vus: 80, steadyStateP95: 457, steadyStateRps: 222 }),
+  ];
+  const findings = compareRuns(runs, 'vu_count');
+  const drifts = findings.filter((f) => f.rule === 'scaling_efficiency_drift');
+  assert.equal(drifts.length, 1, 'expect one batched drift finding, not per-pair');
+  assert.match(drifts[0]!.detail, /20→50 VU/);
+  assert.match(drifts[0]!.detail, /60→80 VU/);
+});
+
+test('VU sweep: scaling_efficiency_overall fires when end-to-end eff < 0.85', () => {
+  const runs = [
+    summary({ testId: 'a', vus: 10, steadyStateP95: 250, steadyStateRps: 37 }),
+    summary({ testId: 'b', vus: 20, steadyStateP95: 262, steadyStateRps: 72 }),
+    summary({ testId: 'c', vus: 80, steadyStateP95: 457, steadyStateRps: 222 }),
+  ];
+  const findings = compareRuns(runs, 'vu_count');
+  const overall = findings.find((f) => f.rule === 'scaling_efficiency_overall');
+  assert.ok(overall, 'expected scaling_efficiency_overall');
+  assert.equal(overall!.severity, 'info');
+  // 8x load, 222/37 ≈ 6.0x throughput → eff ≈ 0.75
+  assert.match(overall!.headline, /10 to 80 VUs/);
+});
+
+test('VU sweep: scaling_efficiency_overall stays silent for 2-run comparisons', () => {
+  const runs = [
+    summary({ testId: 'a', vus: 10, steadyStateRps: 37 }),
+    summary({ testId: 'b', vus: 80, steadyStateRps: 200 }),
+  ];
+  const findings = compareRuns(runs, 'vu_count');
+  assert.equal(findings.find((f) => f.rule === 'scaling_efficiency_overall'), undefined);
+});
+
+test('VU sweep: shape_degradation warns when shape worsens (no shape_divergence)', () => {
+  const runs = [
+    summary({ testId: 'a', vus: 50, shape: 'monotonic-climb', steadyStateP95: 370, steadyStateRps: 150 }),
+    summary({ testId: 'b', vus: 80, shape: 'elevated-plateau', steadyStateP95: 457, steadyStateRps: 222 }),
+  ];
+  const findings = compareRuns(runs, 'vu_count');
+  const deg = findings.find((f) => f.rule === 'shape_degradation');
+  assert.ok(deg, 'expected shape_degradation finding');
+  assert.equal(deg!.severity, 'warn');
+});
+
+test('VU sweep: shape_degradation suppressed when shape_divergence fires', () => {
+  const runs = [
+    summary({ testId: 'a', vus: 50, shape: 'healthy', steadyStateP95: 200, steadyStateRps: 50 }),
+    summary({ testId: 'b', vus: 200, shape: 'monotonic-climb', steadyStateP95: 220, steadyStateRps: 200 }),
+  ];
+  const findings = compareRuns(runs, 'vu_count');
+  assert.ok(findings.some((f) => f.rule === 'shape_divergence'));
+  assert.equal(findings.find((f) => f.rule === 'shape_degradation'), undefined);
+});
+
+test('VU sweep: tail_divergence stays silent when p99 tracks p95', () => {
+  const runs = [
+    summary({ testId: 'a', vus: 10, steadyStateP95: 250, steadyStateP99: 300, steadyStateRps: 37 }),
+    summary({ testId: 'b', vus: 20, steadyStateP95: 500, steadyStateP99: 600, steadyStateRps: 74 }),
+  ];
+  const findings = compareRuns(runs, 'vu_count');
+  assert.equal(findings.find((f) => f.rule === 'tail_divergence'), undefined);
 });
 
 test('VU sweep: latency blowup fires when p95 doubles under <=2x load', () => {
