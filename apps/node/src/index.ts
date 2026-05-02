@@ -1,21 +1,10 @@
-import { env } from './env.js';
+import './env.js';
 import { logger } from './logger.js';
+import { startController } from './controller/start.js';
 
 async function main() {
-  logger.info({ role: env.role }, 'Hammr starting');
-
-  switch (env.role) {
-    case 'controller':
-      await (await import('./controller/start.js')).startController();
-      break;
-    case 'generator':
-      await (await import('./generator/start.js')).startGenerator();
-      break;
-    case 'standalone':
-      await (await import('./controller/start.js')).startController();
-      await (await import('./generator/start.js')).startGenerator();
-      break;
-  }
+  logger.info('Hammr controller starting');
+  await startController();
 }
 
 main().catch((err) => {

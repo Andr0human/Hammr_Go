@@ -22,6 +22,48 @@ services:
       timeout: 3s
       retries: 20
 
+  controller:
+    build:
+      context: .
+      dockerfile: apps/node/Dockerfile
+    image: hammr-controller
+    container_name: hammr-controller
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      HAMMR_PUBLIC_PORT: 3000
+      HAMMR_GEN_PORT: 3001
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DATABASE: hammr
+      SQLITE_PATH: /data/hammr.db
+      LOG_LEVEL: info
+    ports:
+      - '3000:3000'
+    volumes:
+      - controller_data:/data
+
+  echo:
+    image: hammr-controller
+    depends_on:
+      - controller
+    command: ['node_modules/.bin/tsx', 'apps/node/scripts/echo-server.ts', '--port', '4000']
+    expose:
+      - '4000'
+
+  generator:
+    build:
+      context: ./apps/go-generator
+      dockerfile: Dockerfile
+    image: hammr-go-generator
+    depends_on:
+      - controller
+    environment:
+      CONTROLLER_URL: ws://controller:3001/gen
+      # GENERATOR_ID is left to the gen-XXXXXXXX random fallback so each
+      # replica gets a unique id under `--scale generator=N`.
+      LOG_LEVEL: info
+
 volumes:
   clickhouse_data:
   controller_data:

@@ -18,8 +18,6 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md,yml}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md,yml}\"",
     "migrate:clickhouse": "node apps/node/scripts/migrate-clickhouse.mjs",
-    "smoke:undici": "tsx apps/node/scripts/undici-smoke.ts",
-    "gen:demo": "tsx apps/node/scripts/generator-cli.ts",
     "test": "npm run test -w @hammr/node"
   },
   "devDependencies": {

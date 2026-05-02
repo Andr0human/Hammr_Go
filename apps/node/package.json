@@ -10,13 +10,10 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "migrate:clickhouse": "node scripts/migrate-clickhouse.mjs",
-    "smoke:undici": "tsx scripts/undici-smoke.ts",
-    "gen:demo": "tsx scripts/generator-cli.ts",
     "start-test": "tsx scripts/start-test.ts",
     "watch-test": "tsx scripts/watch-test.ts",
     "echo-server": "tsx scripts/echo-server.ts",
     "selftest": "tsx scripts/selftest.ts",
-    "sweep": "tsx scripts/sweep-vu-per-thread.ts",
     "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
@@ -29,7 +26,6 @@
     "pino": "^9.0.0",
     "pino-pretty": "^11.0.0",
     "socket.io": "^4.7.5",
-    "undici": "^6.13.0",
     "ws": "^8.17.0",
     "zod": "^3.23.0"
   },

@@ -1,0 +1,9 @@
+node_modules
+dist
+*.tsbuildinfo
+data
+.env
+.env.*
+*.md
+Dockerfile
+.dockerignore

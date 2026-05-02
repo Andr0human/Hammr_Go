@@ -1,0 +1,13 @@
+# Used when building from the repo root (Node controller image).
+.git
+.gitignore
+node_modules
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+data
+.env
+.env.*
+docs
+apps/web
+.claude
